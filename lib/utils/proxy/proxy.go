@@ -87,6 +87,8 @@ type Dialer interface {
 type directDial struct {
 	// tlsRoutingEnabled indicates that proxy is running in TLSRouting mode.
 	tlsRoutingEnabled bool
+	// proxyPeeringSupported indicates the client supports ProtocolReverseTunnelV2.
+	proxyPeeringSupported bool
 	// insecure is whether to skip certificate validation.
 	insecure bool
 }
@@ -114,8 +116,14 @@ func (d directDial) DialTimeout(network, address string, timeout time.Duration) 
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
+
+		protocols := []string{string(alpncommon.ProtocolReverseTunnel)}
+		if d.proxyPeeringSupported {
+			protocols = append(protocols, string(alpncommon.ProtocolReverseTunnelV2))
+		}
+
 		tlsConn, err := tls.Dial("tcp", address, &tls.Config{
-			NextProtos:         []string{string(alpncommon.ProtocolReverseTunnel)},
+			NextProtos:         protocols,
 			InsecureSkipVerify: d.insecure,
 			ServerName:         addr.Host(),
 		})
@@ -136,6 +144,8 @@ type proxyDial struct {
 	proxyHost string
 	// tlsRoutingEnabled indicates that proxy is running in TLSRouting mode.
 	tlsRoutingEnabled bool
+	// proxyPeeringSupported indicates the client supports ProtocolReverseTunnelV2.
+	proxyPeeringSupported bool
 	// insecure is whether to skip certificate validation.
 	insecure bool
 }
@@ -158,8 +168,14 @@ func (d proxyDial) DialTimeout(network, address string, timeout time.Duration) (
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
+
+		protocols := []string{string(alpncommon.ProtocolReverseTunnel)}
+		if d.proxyPeeringSupported {
+			protocols = append(protocols, string(alpncommon.ProtocolReverseTunnelV2))
+		}
+
 		conn = tls.Client(conn, &tls.Config{
-			NextProtos:         []string{string(alpncommon.ProtocolReverseTunnel)},
+			NextProtos:         protocols,
 			InsecureSkipVerify: d.insecure,
 			ServerName:         address.Host(),
 		})
@@ -183,8 +199,14 @@ func (d proxyDial) Dial(network string, addr string, config *ssh.ClientConfig) (
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
+
+		protocols := []string{string(alpncommon.ProtocolReverseTunnel)}
+		if d.proxyPeeringSupported {
+			protocols = append(protocols, string(alpncommon.ProtocolReverseTunnelV2))
+		}
+
 		pconn = tls.Client(pconn, &tls.Config{
-			NextProtos:         []string{string(alpncommon.ProtocolReverseTunnel)},
+			NextProtos:         protocols,
 			InsecureSkipVerify: d.insecure,
 			ServerName:         address.Host(),
 		})
@@ -204,6 +226,10 @@ func (d proxyDial) Dial(network string, addr string, config *ssh.ClientConfig) (
 type dialerOptions struct {
 	// tlsRoutingEnabled indicates that proxy is running in TLSRouting mode.
 	tlsRoutingEnabled bool
+
+	// proxyPeeringSupported indicates the client supports ProtocolReverseTunnelV2.
+	proxyPeeringSupported bool
+
 	// insecureSkipTLSVerify is whether to skip certificate validation.
 	insecureSkipTLSVerify bool
 }
@@ -215,6 +241,12 @@ type DialerOptionFunc func(options *dialerOptions)
 func WithALPNDialer() DialerOptionFunc {
 	return func(options *dialerOptions) {
 		options.tlsRoutingEnabled = true
+	}
+}
+
+func WithProxyPeeringSupport() DialerOptionFunc {
+	return func(options *dialerOptions) {
+		options.proxyPeeringSupported = true
 	}
 }
 
@@ -243,15 +275,17 @@ func DialerFromEnvironment(addr string, opts ...DialerOptionFunc) Dialer {
 	if proxyAddr == "" {
 		log.Debugf("No proxy set in environment, returning direct dialer.")
 		return directDial{
-			tlsRoutingEnabled: options.tlsRoutingEnabled,
-			insecure:          options.insecureSkipTLSVerify,
+			tlsRoutingEnabled:     options.tlsRoutingEnabled,
+			proxyPeeringSupported: options.proxyPeeringSupported,
+			insecure:              options.insecureSkipTLSVerify,
 		}
 	}
 	log.Debugf("Found proxy %q in environment, returning proxy dialer.", proxyAddr)
 	return proxyDial{
-		proxyHost:         proxyAddr,
-		tlsRoutingEnabled: options.tlsRoutingEnabled,
-		insecure:          options.insecureSkipTLSVerify,
+		proxyHost:             proxyAddr,
+		tlsRoutingEnabled:     options.tlsRoutingEnabled,
+		proxyPeeringSupported: options.proxyPeeringSupported,
+		insecure:              options.insecureSkipTLSVerify,
 	}
 }
 
