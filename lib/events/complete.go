@@ -23,7 +23,6 @@ import (
 	"github.com/gravitational/teleport"
 	apidefaults "github.com/gravitational/teleport/api/defaults"
 	"github.com/gravitational/teleport/api/types/events"
-	apievents "github.com/gravitational/teleport/api/types/events"
 	apiutils "github.com/gravitational/teleport/api/utils"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/utils"
@@ -137,28 +136,31 @@ func (u *UploadCompleter) CheckUploads(ctx context.Context) error {
 		if err != nil {
 			return trace.Wrap(err)
 		}
-		if len(parts) == 0 {
-			continue
-		}
+
 		u.log.Debugf("Upload %v grace period is over. Trying to complete.", upload)
 		if err := u.cfg.Uploader.CompleteUpload(ctx, upload, parts); err != nil {
 			return trace.Wrap(err)
 		}
 		u.log.Debugf("Completed upload %v.", upload)
 		completed++
+
+		if len(parts) == 0 {
+			continue
+		}
+
 		uploadData := u.cfg.Uploader.GetUploadMetadata(upload.SessionID)
 		err = u.ensureSessionEndEvent(ctx, uploadData)
 		if err != nil {
 			return trace.Wrap(err)
 		}
 		session := &events.SessionUpload{
-			Metadata: apievents.Metadata{
+			Metadata: events.Metadata{
 				Type:  SessionUploadEvent,
 				Code:  SessionUploadCode,
 				ID:    uuid.New().String(),
 				Index: SessionUploadIndex,
 			},
-			SessionMetadata: apievents.SessionMetadata{
+			SessionMetadata: events.SessionMetadata{
 				SessionID: string(uploadData.SessionID),
 			},
 			SessionURL: uploadData.URL,
@@ -184,7 +186,7 @@ func (u *UploadCompleter) ensureSessionEndEvent(ctx context.Context, uploadData 
 	var serverID, clusterName, user, login, hostname, namespace, serverAddr string
 	var interactive bool
 
-	// Get session events to find fields for constructed session end
+	// Get session events to find fields for constructed session end)
 	sessionEvents, err := u.cfg.AuditLog.GetSessionEvents(apidefaults.Namespace, uploadData.SessionID, 0, false)
 	if err != nil {
 		return trace.Wrap(err)
@@ -193,17 +195,20 @@ func (u *UploadCompleter) ensureSessionEndEvent(ctx context.Context, uploadData 
 		return nil
 	}
 
-	// Return if session.end event already exists
+	// Return if session end event already exists
 	for _, event := range sessionEvents {
-		if event.GetType() == SessionEndEvent {
+		switch event.GetType() {
+		case SessionEndEvent, WindowsDesktopSessionEndEvent:
 			return nil
 		}
 	}
 
 	// Session start event is the first of session events
 	sessionStart := sessionEvents[0]
-	if sessionStart.GetType() != SessionStartEvent {
-		return trace.BadParameter("invalid session, session start is not the first event")
+	switch typ := sessionStart.GetType(); typ {
+	case SessionStartEvent, WindowsDesktopSessionStartEvent:
+	default:
+		return trace.BadParameter("invalid session, session start is not the first event (%v)", typ)
 	}
 
 	// Set variables
@@ -222,30 +227,51 @@ func (u *UploadCompleter) ensureSessionEndEvent(ctx context.Context, uploadData 
 	lastEvent := sessionEvents[len(sessionEvents)-1]
 
 	participants := getParticipants(sessionEvents)
+	sessionMeta := events.SessionMetadata{
+		SessionID: string(uploadData.SessionID),
+	}
+	userMeta := events.UserMetadata{
+		User:  user,
+		Login: login,
+	}
 
-	sessionEndEvent := &events.SessionEnd{
-		Metadata: events.Metadata{
-			Type:        SessionEndEvent,
-			Code:        SessionEndCode,
-			ClusterName: clusterName,
-		},
-		ServerMetadata: events.ServerMetadata{
-			ServerID:        serverID,
-			ServerNamespace: namespace,
-			ServerHostname:  hostname,
-			ServerAddr:      serverAddr,
-		},
-		SessionMetadata: events.SessionMetadata{
-			SessionID: string(uploadData.SessionID),
-		},
-		UserMetadata: events.UserMetadata{
-			User:  user,
-			Login: login,
-		},
-		Participants: participants,
-		Interactive:  interactive,
-		StartTime:    sessionStart.GetTime(EventTime),
-		EndTime:      lastEvent.GetTime(EventTime),
+	var sessionEndEvent events.AuditEvent
+	switch sessionStart.GetType() {
+	case SessionStartEvent:
+		sessionEndEvent = &events.SessionEnd{
+			Metadata: events.Metadata{
+				Type:        SessionEndEvent,
+				Code:        SessionEndCode,
+				ClusterName: clusterName,
+			},
+			ServerMetadata: events.ServerMetadata{
+				ServerID:        serverID,
+				ServerNamespace: namespace,
+				ServerHostname:  hostname,
+				ServerAddr:      serverAddr,
+			},
+			SessionMetadata: sessionMeta,
+			UserMetadata:    userMeta,
+
+			Participants: participants,
+			Interactive:  interactive,
+			StartTime:    sessionStart.GetTime(EventTime),
+			EndTime:      lastEvent.GetTime(EventTime),
+		}
+	case WindowsDesktopSessionStartEvent:
+		sessionEndEvent = &events.WindowsDesktopSessionEnd{
+			Metadata: events.Metadata{
+				Type:        WindowsDesktopSessionEndEvent,
+				Code:        DesktopSessionEndCode,
+				ClusterName: clusterName,
+			},
+			SessionMetadata: sessionMeta,
+			UserMetadata:    userMeta,
+
+			Participants: participants,
+			StartTime:    sessionStart.GetTime(EventTime),
+			EndTime:      lastEvent.GetTime(EventTime),
+		}
 	}
 
 	// Check and set event fields
